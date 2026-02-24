@@ -35,7 +35,6 @@ def encode_alac(input: Path, output: Path):
         "-map", "0:a",
         "-map", "0:v?",
     ] + resample_params + [
-        "-ar", f"{sample_rate}",
         "-c:v", "copy",
         "-disposition:v", "attached_pic",
         "-c:a", "flac",
@@ -50,18 +49,18 @@ def encode_alac(input: Path, output: Path):
             capture_output=True, text=True, encoding="utf-8", errors="ignore"
         )
     except Exception as e:
-        print(f"转换失败：\n{e}")
+        print(f"编码失败：\n{e}")
         # print(" ".join(cmd))
     else:
-        print("转换成功！")
+        print("编码成功！")
 
 
 if __name__ == "__main__":
 
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Re-encode lossless music in <= 48 kHz sample rate.")
 
-    parser.add_argument("--input", "-i", type=str, required=True)
-    parser.add_argument("--output", "-o", type=str, required=True)
+    parser.add_argument("--input", "-i", type=str, required=True, help="input dir")
+    parser.add_argument("--output", "-o", type=str, required=True, help="output dir")
 
     args = parser.parse_args()
 
