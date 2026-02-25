@@ -48,11 +48,24 @@ def get_loudness(fn: Path) -> Loudness:
         return loudness
 
 
+def parse_time(t: str) -> float:
+    ts = t.split(":")
+    tc = 0
+
+    for t in ts:
+        tc = tc * 60 + float(t)
+
+    return tc
+
+
 def encode_clip(args: argparse.Namespace):
 
     # 0. sanitize
     input = Path(args.fn)
     output = Path(args.output)
+
+    start = parse_time(args.start)
+    end = parse_time(args.end)
 
     if output.suffix.lower() != ".m4a":
         output = output.parent.joinpath(f"{output.stem}.m4a")
@@ -65,7 +78,7 @@ def encode_clip(args: argparse.Namespace):
     cmd = [
         "ffmpeg", "-hide_banner",
         "-i", str(input.resolve()),
-        "-ss", f"{args.start:.3f}", "-to", f"{args.end:.3f}",
+        "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
         "-map_metadata", "-1", # no metadata
         "-vn",
         "-y", str(temp_output.resolve()),
@@ -111,8 +124,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Clip audio from input video and loudnorm it!")
 
     parser.add_argument("fn", type=str)
-    parser.add_argument("--start", "-s", type=float, required=True)
-    parser.add_argument("--end", "-e", type=float, required=True)
+    parser.add_argument("--start", "-s", type=str, required=True)
+    parser.add_argument("--end", "-e", type=str, required=True)
     parser.add_argument("--output", "-o", type=str, required=True)
     parser.add_argument("-i", "--LUFS", type=float, help="loudness target", default=-18.0)
     parser.add_argument("-l", "--LRA", type=float, help="loudness range", default=7.0)
