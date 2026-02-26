@@ -49,6 +49,8 @@ def get_loudness(fn: Path) -> Loudness:
 
 
 def parse_time(t: str) -> float:
+    if not t: return -1
+
     ts = t.split(":")
     tc = 0
 
@@ -78,7 +80,8 @@ def encode_clip(args: argparse.Namespace):
     cmd = [
         "ffmpeg", "-hide_banner",
         "-i", str(input.resolve()),
-        "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
+        "-ss", f"{start:.3f}",
+        *(["-to", f"{end:.3f}"] if end > 0 else []),
         "-map_metadata", "-1", # no metadata
         "-vn",
         "-y", str(temp_output.resolve()),
@@ -124,8 +127,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Clip audio from input video and loudnorm it!")
 
     parser.add_argument("fn", type=str)
-    parser.add_argument("--start", "-s", type=str, required=True)
-    parser.add_argument("--end", "-e", type=str, required=True)
+    parser.add_argument("--start", "-s", type=str, default="0")
+    parser.add_argument("--end", "-e", type=str, default="")
     parser.add_argument("--output", "-o", type=str, required=True)
     parser.add_argument("-i", "--LUFS", type=float, help="loudness target", default=-18.0)
     parser.add_argument("-l", "--LRA", type=float, help="loudness range", default=7.0)
