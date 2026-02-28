@@ -1,11 +1,10 @@
-import shutil
 import argparse
 import json
 import re
-import shutil
 import subprocess
 
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import NamedTuple
 
 
@@ -72,52 +71,53 @@ def encode_clip(args: argparse.Namespace):
     if output.suffix.lower() != ".m4a":
         output = output.parent.joinpath(f"{output.stem}.m4a")
 
-    # 1. clip -> flac
-    temp_output = output.parent.joinpath(f"{output.stem}.flac")
 
-    print(f"{str(input)} -> {str(temp_output)} (temporary)")
+    with TemporaryDirectory(prefix="QuipClip_") as temp_dir:
+        # 1. clip -> flac
+        temp_path = Path(temp_dir)
+        temp_output = temp_path.joinpath(f"{output.stem}.flac")
 
-    cmd = [
-        "ffmpeg", "-hide_banner",
-        "-i", str(input.resolve()),
-        "-ss", f"{start:.3f}",
-        *(["-to", f"{end:.3f}"] if end > 0 else []),
-        "-map_metadata", "-1", # no metadata
-        "-vn",
-        "-y", str(temp_output.resolve()),
-    ]
+        print(f"{str(input)} -> {str(temp_output)} (temporary)")
 
-    subprocess.run(
-        cmd, check=True,
-        capture_output=True, text=True,
-        encoding="utf-8", errors="ignore"
-    )
+        cmd = [
+            "ffmpeg", "-hide_banner",
+            "-i", str(input.resolve()),
+            "-ss", f"{start:.3f}",
+            *(["-to", f"{end:.3f}"] if end > 0 else []),
+            "-map_metadata", "-1", # no metadata
+            "-vn",
+            "-y", str(temp_output.resolve()),
+        ]
 
-    loudness = get_loudness(temp_output)
-    measured = f"measured_I={loudness.I}:measured_LRA={loudness.LRA}:measured_TP={loudness.TP}:measured_thresh={loudness.Thresh}"
-    target = f"loudnorm=I={args.LUFS}:LRA={args.LRA}:TP={args.TP}"
+        subprocess.run(
+            cmd, check=True,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="ignore"
+        )
 
-    print("measure temp output:", loudness)
+        loudness = get_loudness(temp_output)
+        measured = f"measured_I={loudness.I}:measured_LRA={loudness.LRA}:measured_TP={loudness.TP}:measured_thresh={loudness.Thresh}"
+        target = f"loudnorm=I={args.LUFS}:LRA={args.LRA}:TP={args.TP}"
 
-    cmd = [
-        "ffmpeg", "-hide_banner",
-        "-i", str(temp_output.resolve()),
-        "-map_metadata", "-1", # no metadata
-        "-vn", "-c:a", "aac", "-ab", "192k",
-        "-af", f"{target}:{measured}",
-        "-y", str(output.resolve()),
-    ]
+        print("measure temp output:", loudness)
 
-    print(f"{str(temp_output)} -> {str(output)} (loudnorm)")
+        cmd = [
+            "ffmpeg", "-hide_banner",
+            "-i", str(temp_output.resolve()),
+            "-map_metadata", "-1", # no metadata
+            "-vn", "-c:a", "aac", "-ab", "192k",
+            "-af", f"{target}:{measured}",
+            "-y", str(output.resolve()),
+        ]
 
-    subprocess.run(
-        cmd, check=True,
-        capture_output=True, text=True,
-        encoding="utf-8", errors="ignore"
-    )
+        print(f"{str(temp_output)} -> {str(output)} (loudnorm)")
 
-    print(f"delete {temp_output}")
-    temp_output.unlink(missing_ok=True)
+        subprocess.run(
+            cmd, check=True,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="ignore"
+        )
+
 
     print("FINISHED")
 
@@ -127,13 +127,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Clip audio from input video and loudnorm it!")
 
     parser.add_argument("fn", type=str)
-    parser.add_argument("--start", "-s", type=str, default="0")
-    parser.add_argument("--end", "-e", type=str, default="")
-    parser.add_argument("--output", "-o", type=str, required=True)
+    parser.add_argument("output_fn", type=str, nargs="?")
+    parser.add_argument("--start", "-ss", type=str, default="0")
+    parser.add_argument("--end", "-to", type=str, default="")
+    parser.add_argument("--output", "-o", type=str, required=False)
     parser.add_argument("-i", "--LUFS", type=float, help="loudness target", default=-18.0)
     parser.add_argument("-l", "--LRA", type=float, help="loudness range", default=7.0)
     parser.add_argument("-t", "--TP", type=float, help="true peak loudness", default=-1.0)
 
     args = parser.parse_args()
+    args.output = args.output if args.output else args.output_fn
 
     encode_clip(args)
