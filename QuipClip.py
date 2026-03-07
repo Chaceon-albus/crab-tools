@@ -106,7 +106,7 @@ def encode_clip(args: argparse.Namespace):
             "-i", str(temp_output.resolve()),
             "-map_metadata", "-1", # no metadata
             "-vn", "-c:a", "aac", "-ab", "192k",
-            "-af", f"{target}:{measured}",
+            "-af", f"{target}:{measured},aresample=resampler=soxr:osr=48000:precision=28",
             "-y", str(output.resolve()),
         ]
 
@@ -118,6 +118,8 @@ def encode_clip(args: argparse.Namespace):
             encoding="utf-8", errors="ignore"
         )
 
+        final_loudness = get_loudness(output)
+        print("measure final output:", final_loudness)
 
     print("FINISHED")
 
