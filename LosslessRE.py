@@ -28,6 +28,9 @@ def encode_alac(input: Path, output: Path):
         sample_rate = 48000
         resample_params = ["-af", f"aresample=resampler=soxr:osr={sample_rate}:precision=28"]
 
+    # 5.1 -> 2.0
+    # -af "pan=stereo|FL < 1.0*FL + 0.4*FC + 0.6*SL + 0.5*LFE|FR < 1.0*FR + 0.4*FC + 0.6*SR + 0.5*LFE"
+
     cmd = [
         "ffmpeg", "-hide_banner",
         "-i", str(input.resolve()),
