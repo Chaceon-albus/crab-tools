@@ -5,31 +5,37 @@ import subprocess
 from pathlib import Path
 
 
-def get_sample_rate(fn: Path):
+def get_audio_info(fn: Path) -> tuple[int, int]:
     cmd = [
         "ffprobe",
         "-v", "error",
         "-select_streams", "a:0",
-        "-show_entries", "stream=sample_rate",
+        "-show_entries", "stream=sample_rate,channels",
         "-of", "json",
         str(fn)
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
     data = json.loads(result.stdout)
-    return int(data["streams"][0]["sample_rate"])
+    stream = data["streams"][0]
+    return int(stream.get("sample_rate", 0)), int(stream.get("channels", 2))
 
+def encode_flac(input: Path, output: Path) -> None:
 
-def encode_alac(input: Path, output: Path):
+    sample_rate, channels = get_audio_info(input.resolve())
 
-    sample_rate = get_sample_rate(input.resolve())
+    audio_filters = []
 
-    resample_params = []
+    if channels == 6:
+        # 5.1 -> 2.0 Downmix (target: foobar QQM hearing)
+        audio_filters.append("pan=stereo|FL < 1.0*FL + 0.4*FC + 0.5*SL + 0.3*LFE|FR < 1.0*FR + 0.4*FC + 0.5*SR + 0.3*LFE")
+
     if sample_rate > 48000:
-        sample_rate = 48000
-        resample_params = ["-af", f"aresample=resampler=soxr:osr={sample_rate}:precision=28"]
+        # resample to 48 kHz
+        audio_filters.append("aresample=resampler=soxr:osr=48000:precision=28")
 
-    # 5.1 -> 2.0
-    # -af "pan=stereo|FL < 1.0*FL + 0.4*FC + 0.6*SL + 0.5*LFE|FR < 1.0*FR + 0.4*FC + 0.6*SR + 0.5*LFE"
+    af_params = []
+    if audio_filters:
+        af_params = ["-af", ",".join(audio_filters)]
 
     cmd = [
         "ffmpeg", "-hide_banner",
@@ -37,7 +43,7 @@ def encode_alac(input: Path, output: Path):
         "-map_metadata", "0",
         "-map", "0:a",
         "-map", "0:v?",
-    ] + resample_params + [
+    ] + af_params + [
         "-c:v", "copy",
         "-disposition:v", "attached_pic",
         "-c:a", "flac",
@@ -51,9 +57,12 @@ def encode_alac(input: Path, output: Path):
             cmd, check=True,
             capture_output=True, text=True, encoding="utf-8", errors="ignore"
         )
+    except subprocess.CalledProcessError as e:
+        print(f"编码失败：\n{e}")
+        if e.stderr:
+            print(f"详细错误信息：\n{e.stderr.strip()}")
     except Exception as e:
         print(f"编码失败：\n{e}")
-        # print(" ".join(cmd))
     else:
         print("编码成功！")
 
@@ -62,17 +71,22 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Re-encode lossless music in <= 48 kHz sample rate.")
 
-    parser.add_argument("--input", "-i", type=str, required=True, help="input dir")
-    parser.add_argument("--output", "-o", type=str, required=True, help="output dir")
+    parser.add_argument("--input", "-i", type=str, required=True, help="input file or dir")
+    parser.add_argument("--output", "-o", type=str, required=True, help="output file or dir")
 
     args = parser.parse_args()
 
-    odir = Path(args.output)
-    if not odir.exists(): odir.mkdir(parents=True)
+    ipath = Path(args.input)
+    opath = Path(args.output)
 
-    for fn in Path(args.input).iterdir():
-        if fn.is_file() and fn.suffix.lower() == ".flac":
-            encode_alac(
-                fn,
-                odir.joinpath(f"{fn.stem}.flac"),
-            )
+    if ipath.is_file():
+        opath.parent.mkdir(parents=True, exist_ok=True)
+        encode_flac(ipath, opath)
+    elif ipath.is_dir():
+        opath.mkdir(parents=True, exist_ok=True)
+        for fn in ipath.iterdir():
+            if fn.is_file() and fn.suffix.lower() == ".flac":
+                encode_flac(
+                    fn,
+                    opath.joinpath(f"{fn.stem}.flac"),
+                )
