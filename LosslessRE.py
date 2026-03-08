@@ -31,7 +31,7 @@ def encode_flac(input: Path, output: Path) -> None:
 
     if sample_rate > 48000:
         # resample to 48 kHz
-        audio_filters.append("aresample=resampler=soxr:osr=48000:precision=28")
+        audio_filters.append("aresample=resampler=soxr:osr=48000:precision=33:dither_method=triangular")
 
     af_params = []
     if audio_filters:
