@@ -26,7 +26,7 @@ def get_loudness(fn: Path) -> Loudness:
     stderr = ex.stderr.decode("utf-8", errors="ignore")
 
     r = re.search(r"\[Parsed_loudnorm.*?\}", stderr, re.DOTALL)
-    r = re.search(r"{.*}", r.group(0), re.DOTALL)
+    r = re.search(r"{.*}", r.group(0), re.DOTALL) # type: ignore
 
     if not r:
         print("ffmpeg gives unexpected output as:")
@@ -68,14 +68,29 @@ def encode_clip(args: argparse.Namespace):
     start = parse_time(args.start)
     end = parse_time(args.end)
 
-    if output.suffix.lower() != ".m4a":
-        output = output.parent.joinpath(f"{output.stem}.m4a")
+    if args.video:
+        if output.suffix.lower() not in [".mp4", ".mkv"]:
+            if args.lossless:
+                output = output.parent.joinpath(f"{output.stem}.mkv")
+            else:
+                output = output.parent.joinpath(f"{output.stem}.mp4")
+        if args.LUFS < -14.0:
+            print(f"LUFS is {args.LUFS}, adjusting to -14 for video.")
+            args.LUFS = -14.0
+    else:
+        if args.lossless:
+            if output.suffix.lower() != ".flac":
+                output = output.parent.joinpath(f"{output.stem}.flac")
+        else:
+            if output.suffix.lower() != ".m4a":
+                output = output.parent.joinpath(f"{output.stem}.m4a")
 
 
     with TemporaryDirectory(prefix="QuipClip_") as temp_dir:
         # 1. clip -> flac
         temp_path = Path(temp_dir)
-        temp_output = temp_path.joinpath(f"{output.stem}.flac")
+        temp_ext = ".mkv" if args.video else ".flac"
+        temp_output = temp_path.joinpath(f"{output.stem}{temp_ext}")
 
         print(f"{str(input)} -> {str(temp_output)} (temporary)")
 
@@ -85,9 +100,17 @@ def encode_clip(args: argparse.Namespace):
             "-ss", f"{start:.3f}",
             *(["-to", f"{end:.3f}"] if end > 0 else []),
             "-map_metadata", "-1", # no metadata
-            "-vn",
-            "-y", str(temp_output.resolve()),
         ]
+
+        if args.video:
+            cmd.extend([
+                "-c:v", "libx264", "-preset", "veryslow", "-crf", "23",
+                "-c:a", "flac"
+            ])
+        else:
+            cmd.extend(["-vn"])
+
+        cmd.extend(["-y", str(temp_output.resolve())])
 
         subprocess.run(
             cmd, check=True,
@@ -97,7 +120,9 @@ def encode_clip(args: argparse.Namespace):
 
         loudness = get_loudness(temp_output)
         measured = f"measured_I={loudness.I}:measured_LRA={loudness.LRA}:measured_TP={loudness.TP}:measured_thresh={loudness.Thresh}"
-        target = f"loudnorm=I={args.LUFS}:LRA={args.LRA}:TP={args.TP}"
+
+        target_LRA = min(max(float(loudness.LRA), 1.0), 50.0) if args.video else args.LRA
+        target = f"loudnorm=I={args.LUFS}:LRA={target_LRA}:TP={args.TP}"
 
         print("measure temp output:", loudness)
 
@@ -105,10 +130,26 @@ def encode_clip(args: argparse.Namespace):
             "ffmpeg", "-hide_banner",
             "-i", str(temp_output.resolve()),
             "-map_metadata", "-1", # no metadata
-            "-vn", "-c:a", "aac", "-ab", "192k",
-            "-af", f"{target}:{measured},aresample=resampler=soxr:osr=48000:precision=28",
-            "-y", str(output.resolve()),
         ]
+
+        if args.video:
+            cmd.extend(["-c:v", "copy"])
+        else:
+            cmd.extend(["-vn"])
+
+        if args.lossless:
+            cmd.extend([
+                "-c:a", "flac",
+                "-af", f"{target}:{measured},aresample=resampler=soxr:osr=48000:precision=33:dither_method=triangular",
+                "-y", str(output.resolve()),
+            ])
+        else:
+            audio_bitrate = "320k" if args.video else "192k"
+            cmd.extend([
+                "-c:a", "aac", "-ab", audio_bitrate,
+                "-af", f"{target}:{measured},aresample=resampler=soxr:osr=48000:precision=33:dither_method=triangular",
+                "-y", str(output.resolve()),
+            ])
 
         print(f"{str(temp_output)} -> {str(output)} (loudnorm)")
 
@@ -136,6 +177,8 @@ if __name__ == "__main__":
     parser.add_argument("-i", "--LUFS", type=float, help="loudness target", default=-18.0)
     parser.add_argument("-l", "--LRA", type=float, help="loudness range", default=7.0)
     parser.add_argument("-t", "--TP", type=float, help="true peak loudness", default=-1.0)
+    parser.add_argument("--video", action="store_true", help="encode video as well")
+    parser.add_argument("--lossless", action="store_true", help="encode audio as flac")
 
     args = parser.parse_args()
     args.output = args.output if args.output else args.output_fn
