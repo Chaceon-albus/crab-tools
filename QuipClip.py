@@ -74,9 +74,9 @@ def encode_clip(args: argparse.Namespace):
                 output = output.parent.joinpath(f"{output.stem}.mkv")
             else:
                 output = output.parent.joinpath(f"{output.stem}.mp4")
-        if args.LUFS < -14.0:
-            print(f"LUFS is {args.LUFS}, adjusting to -14 for video.")
-            args.LUFS = -14.0
+        if args.LUFS < -12.0:
+            print(f"LUFS is {args.LUFS}, adjusting to -12 for video.")
+            args.LUFS = -12.0
     else:
         if args.lossless:
             if output.suffix.lower() != ".flac":
