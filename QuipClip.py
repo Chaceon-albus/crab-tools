@@ -74,9 +74,6 @@ def encode_clip(args: argparse.Namespace):
                 output = output.parent.joinpath(f"{output.stem}.mkv")
             else:
                 output = output.parent.joinpath(f"{output.stem}.mp4")
-        if args.LUFS < -12.0:
-            print(f"LUFS is {args.LUFS}, adjusting to -12 for video.")
-            args.LUFS = -12.0
     else:
         if args.lossless:
             if output.suffix.lower() != ".flac":
@@ -122,7 +119,12 @@ def encode_clip(args: argparse.Namespace):
         measured = f"measured_I={loudness.I}:measured_LRA={loudness.LRA}:measured_TP={loudness.TP}:measured_thresh={loudness.Thresh}"
 
         target_LRA = min(max(float(loudness.LRA), 1.0), 50.0) if args.video else args.LRA
-        target = f"loudnorm=I={args.LUFS}:LRA={target_LRA}:TP={args.TP}"
+
+        target_LUFS = args.LUFS
+        if args.video and float(loudness.TP) > -99.0:
+            target_LUFS = float(loudness.I) - (float(loudness.TP) - args.TP)
+
+        target = f"loudnorm=I={target_LUFS}:LRA={target_LRA}:TP={args.TP}"
 
         print("measure temp output:", loudness)
 
