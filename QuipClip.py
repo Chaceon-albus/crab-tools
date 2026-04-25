@@ -93,9 +93,9 @@ def encode_clip(args: argparse.Namespace):
 
         cmd = [
             "ffmpeg", "-hide_banner",
-            "-i", str(input.resolve()),
             "-ss", f"{start:.3f}",
             *(["-to", f"{end:.3f}"] if end > 0 else []),
+            "-i", str(input.resolve()),
             "-map_metadata", "-1", # no metadata
         ]
 
