@@ -68,6 +68,10 @@ def encode_clip(args: argparse.Namespace):
     start = parse_time(args.start)
     end = parse_time(args.end)
 
+    if start > end:
+        print(f"Skip, start time {start} s is later than end time {end} s.")
+        return
+
     if args.video:
         if output.suffix.lower() not in [".mp4", ".mkv"]:
             if args.lossless:
