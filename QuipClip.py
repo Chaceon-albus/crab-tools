@@ -128,9 +128,20 @@ def encode_clip(args: argparse.Namespace):
         if args.video and float(loudness.TP) > -99.0:
             target_LUFS = float(loudness.I) - (float(loudness.TP) - args.TP)
 
-        target = f"loudnorm=I={target_LUFS}:LRA={target_LRA}:TP={args.TP}"
-
-        print("measure temp output:", loudness)
+        if not args.loudnorm:
+            measured_I = float(loudness.I)
+            measured_TP = float(loudness.TP)
+            gain = args.LUFS - measured_I
+            if measured_TP > -99.0:
+                gain = min(gain, args.TP - measured_TP)
+            audio_filter = f"volume={gain:.2f}dB"
+            print("measure temp output:", loudness)
+            print(f"gain adjustment: {gain:.2f} dB")
+        else:
+            extra_opt = ":linear=true" if args.linear else ""
+            target = f"loudnorm=I={target_LUFS}:LRA={target_LRA}:TP={args.TP}{extra_opt}"
+            audio_filter = f"{target}:{measured}"
+            print("measure temp output:", loudness)
 
         cmd = [
             "ffmpeg", "-hide_banner",
@@ -146,18 +157,18 @@ def encode_clip(args: argparse.Namespace):
         if args.lossless:
             cmd.extend([
                 "-c:a", "flac",
-                "-af", f"{target}:{measured},aresample=resampler=soxr:osr=48000:precision=33:dither_method=triangular",
+                "-af", f"{audio_filter},aresample=resampler=soxr:osr=48000:precision=33:dither_method=triangular",
                 "-y", str(output.resolve()),
             ])
         else:
             audio_bitrate = "320k" if args.video else "192k"
             cmd.extend([
                 "-c:a", "aac", "-ab", audio_bitrate,
-                "-af", f"{target}:{measured},aresample=resampler=soxr:osr=48000:precision=33:dither_method=triangular",
+                "-af", f"{audio_filter},aresample=resampler=soxr:osr=48000:precision=33:dither_method=triangular",
                 "-y", str(output.resolve()),
             ])
 
-        print(f"{str(temp_output)} -> {str(output)} (loudnorm)")
+        print(f"{str(temp_output)} -> {str(output)} ({'loudnorm' if args.loudnorm else 'volume'})")
 
         subprocess.run(
             cmd, check=True,
@@ -185,6 +196,8 @@ if __name__ == "__main__":
     parser.add_argument("-t", "--TP", type=float, help="true peak loudness", default=-1.0)
     parser.add_argument("--video", action="store_true", help="encode video as well")
     parser.add_argument("--lossless", action="store_true", help="encode audio as flac")
+    parser.add_argument("--loudnorm", action="store_true", help="use loudnorm filter instead of simple volume gain")
+    parser.add_argument("--linear", action="store_true", help="use linear loudnorm")
 
     args = parser.parse_args()
     args.output = args.output if args.output else args.output_fn
