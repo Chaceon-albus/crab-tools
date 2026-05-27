@@ -15,6 +15,98 @@ class Loudness(NamedTuple):
     Thresh: float
 
 
+class VideoColor(NamedTuple):
+    range: str | None
+    space: str | None
+    transfer: str | None
+    primaries: str | None
+
+
+X264_COLOR_PRIMARIES = {
+    "bt709", "bt470m", "bt470bg", "smpte170m", "smpte240m",
+    "film", "bt2020", "smpte428", "smpte431", "smpte432", "jedec-p22",
+}
+X264_COLOR_TRANSFERS = {
+    "bt709", "bt470m", "bt470bg", "smpte170m", "smpte240m",
+    "linear", "log100", "log316", "iec61966-2-4", "bt1361e",
+    "iec61966-2-1", "bt2020-10", "bt2020-12", "smpte2084",
+    "smpte428", "arib-std-b67",
+}
+X264_COLOR_MATRICES = {
+    "gbr", "bt709", "fcc", "bt470bg", "smpte170m", "smpte240m",
+    "ycgco", "bt2020nc", "bt2020c", "smpte2085",
+    "chroma-derived-nc", "chroma-derived-c", "ictcp",
+}
+
+
+def known_color(value: str | None) -> str | None:
+    if value in [None, "", "unknown", "unspecified"]:
+        return None
+    return value
+
+
+def get_video_color(fn: Path) -> VideoColor:
+    ex = subprocess.run([
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=color_range,color_space,color_transfer,color_primaries",
+        "-of", "json",
+        str(fn.resolve()),
+    ], capture_output=True, text=True, encoding="utf-8", errors="ignore")
+
+    if ex.returncode != 0:
+        return VideoColor(None, None, None, None)
+
+    try:
+        streams = json.loads(ex.stdout).get("streams", [])
+    except json.JSONDecodeError:
+        return VideoColor(None, None, None, None)
+
+    if not streams:
+        return VideoColor(None, None, None, None)
+
+    stream = streams[0]
+    return VideoColor(
+        known_color(stream.get("color_range")),
+        known_color(stream.get("color_space")),
+        known_color(stream.get("color_transfer")),
+        known_color(stream.get("color_primaries")),
+    )
+
+
+def video_color_args(color: VideoColor) -> list[str]:
+    args = []
+
+    if color.range:
+        args.extend(["-color_range", color.range])
+    if color.space:
+        args.extend(["-colorspace", color.space])
+    if color.transfer:
+        args.extend(["-color_trc", color.transfer])
+    if color.primaries:
+        args.extend(["-color_primaries", color.primaries])
+
+    return args
+
+
+def x264_color_args(color: VideoColor) -> list[str]:
+    params = []
+
+    if color.range == "pc":
+        params.append("fullrange=on")
+    elif color.range == "tv":
+        params.append("fullrange=off")
+
+    if color.primaries in X264_COLOR_PRIMARIES:
+        params.append(f"colorprim={color.primaries}")
+    if color.transfer in X264_COLOR_TRANSFERS:
+        params.append(f"transfer={color.transfer}")
+    if color.space in X264_COLOR_MATRICES:
+        params.append(f"colormatrix={color.space}")
+
+    return ["-x264-params", ":".join(params)] if params else []
+
+
 def get_loudness(fn: Path) -> Loudness:
 
     ex = subprocess.run([
@@ -72,6 +164,8 @@ def encode_clip(args: argparse.Namespace):
         print(f"Skip, start time {start} s is later than end time {end} s.")
         return
 
+    video_color = get_video_color(input) if args.video else VideoColor(None, None, None, None)
+
     if args.video:
         if output.suffix.lower() not in [".mp4", ".mkv"]:
             if args.lossless:
@@ -106,6 +200,8 @@ def encode_clip(args: argparse.Namespace):
         if args.video:
             cmd.extend([
                 "-c:v", "libx264", "-preset", "veryslow", "-crf", "23",
+                *video_color_args(video_color),
+                *x264_color_args(video_color),
                 "-c:a", "flac"
             ])
         else:
