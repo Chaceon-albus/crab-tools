@@ -107,6 +107,29 @@ def x264_color_args(color: VideoColor) -> list[str]:
     return ["-x264-params", ":".join(params)] if params else []
 
 
+def get_audio_codec(fn: Path) -> str | None:
+    ex = subprocess.run([
+        "ffprobe", "-v", "error",
+        "-select_streams", "a:0",
+        "-show_entries", "stream=codec_name",
+        "-of", "json",
+        str(fn.resolve()),
+    ], capture_output=True, text=True, encoding="utf-8", errors="ignore")
+
+    if ex.returncode != 0:
+        return None
+
+    try:
+        streams = json.loads(ex.stdout).get("streams", [])
+    except json.JSONDecodeError:
+        return None
+
+    if not streams:
+        return None
+
+    return streams[0].get("codec_name")
+
+
 def get_loudness(fn: Path) -> Loudness:
 
     ex = subprocess.run([
@@ -164,6 +187,72 @@ def encode_clip(args: argparse.Namespace):
         print(f"Skip, start time {start} s is later than end time {end} s.")
         return
 
+    if args.acopy:
+        if not output.suffix:
+            if args.video:
+                if args.lossless:
+                    output = output.parent.joinpath(f"{output.stem}.mkv")
+                else:
+                    output = output.parent.joinpath(f"{output.stem}.mp4")
+            else:
+                codec = get_audio_codec(input)
+                suffix_map = {
+                    "flac": ".flac",
+                    "mp3": ".mp3",
+                    "opus": ".opus",
+                    "vorbis": ".ogg",
+                    "aac": ".m4a",
+                    "alac": ".m4a",
+                }
+                ext = suffix_map.get(codec) if codec else None
+                if not ext:
+                    if input.suffix.lower() not in [".mp4", ".mkv", ".avi", ".mov", ".flv", ".webmts", ".ts", ".webm"]:
+                        ext = input.suffix.lower()
+                    else:
+                        ext = ".m4a"
+                output = output.parent.joinpath(f"{output.stem}{ext}")
+        else:
+            if args.video and output.suffix.lower() not in [".mp4", ".mkv"]:
+                if args.lossless:
+                    output = output.parent.joinpath(f"{output.stem}.mkv")
+                else:
+                    output = output.parent.joinpath(f"{output.stem}.mp4")
+
+        cmd = [
+            "ffmpeg", "-hide_banner",
+            "-ss", f"{start:.3f}",
+            *(["-to", f"{end:.3f}"] if end > 0 else []),
+            "-i", str(input.resolve()),
+            "-ss", "0",
+            "-map_metadata", "-1", # no metadata
+        ]
+
+        if args.video:
+            video_color = get_video_color(input)
+            cmd.extend([
+                "-c:v", "libx264", "-preset", "veryslow", "-crf", "23",
+                *video_color_args(video_color),
+                *x264_color_args(video_color),
+                "-c:a", "copy",
+            ])
+            print(f"{str(input)} -> {str(output)} (encode video, copy audio)")
+        else:
+            cmd.extend(["-vn", "-c:a", "copy"])
+            print(f"{str(input)} -> {str(output)} (copy audio)")
+
+        cmd.extend(["-y", str(output.resolve())])
+
+        subprocess.run(
+            cmd, check=True,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="ignore"
+        )
+
+        final_loudness = get_loudness(output)
+        print("measure final output:", final_loudness)
+        print("FINISHED")
+        return
+
     video_color = get_video_color(input) if args.video else VideoColor(None, None, None, None)
 
     if args.video:
@@ -194,6 +283,7 @@ def encode_clip(args: argparse.Namespace):
             "-ss", f"{start:.3f}",
             *(["-to", f"{end:.3f}"] if end > 0 else []),
             "-i", str(input.resolve()),
+            "-ss", "0", # avoid wrong duration
             "-map_metadata", "-1", # no metadata
         ]
 
@@ -287,13 +377,14 @@ if __name__ == "__main__":
     parser.add_argument("--start", "-ss", type=str, default="0")
     parser.add_argument("--end", "-to", type=str, default="")
     parser.add_argument("--output", "-o", type=str, required=False)
-    parser.add_argument("-i", "--LUFS", type=float, help="loudness target", default=-18.0)
+    parser.add_argument("-I", "--LUFS", type=float, help="loudness target", default=-18.0)
     parser.add_argument("-l", "--LRA", type=float, help="loudness range", default=7.0)
     parser.add_argument("-t", "--TP", type=float, help="true peak loudness", default=-1.0)
     parser.add_argument("--video", action="store_true", help="encode video as well")
     parser.add_argument("--lossless", action="store_true", help="encode audio as flac")
     parser.add_argument("--loudnorm", action="store_true", help="use loudnorm filter instead of simple volume gain")
     parser.add_argument("--linear", action="store_true", help="use linear loudnorm")
+    parser.add_argument("--acopy", action="store_true", help="only copy audio stream without re-encoding")
 
     args = parser.parse_args()
     args.output = args.output if args.output else args.output_fn
