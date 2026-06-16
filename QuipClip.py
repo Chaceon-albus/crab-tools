@@ -347,7 +347,7 @@ def encode_clip(args: argparse.Namespace):
                 "-y", str(output.resolve()),
             ])
         else:
-            audio_bitrate = "320k" if args.video else "192k"
+            audio_bitrate = args.bitrate or ("320k" if args.video else "192k")
             cmd.extend([
                 "-c:a", "aac", "-ab", audio_bitrate,
                 "-af", f"{audio_filter},aresample=resampler=soxr:osr=48000:precision=33:dither_method=triangular",
@@ -385,6 +385,7 @@ if __name__ == "__main__":
     parser.add_argument("--loudnorm", action="store_true", help="use loudnorm filter instead of simple volume gain")
     parser.add_argument("--linear", action="store_true", help="use linear loudnorm")
     parser.add_argument("--acopy", action="store_true", help="only copy audio stream without re-encoding")
+    parser.add_argument("--bitrate", type=str, default="", help="use audio bitrate if specified")
 
     args = parser.parse_args()
     args.output = args.output if args.output else args.output_fn
