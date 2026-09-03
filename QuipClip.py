@@ -1,6 +1,7 @@
 import argparse
 import json
 import re
+import shlex
 import subprocess
 
 from pathlib import Path
@@ -174,26 +175,36 @@ def parse_time(t: str) -> float:
     return tc
 
 
-def encode_clip(args: argparse.Namespace):
+def parse_segments(starts: list[str] | None, ends: list[str] | None) -> list[tuple[float, float]]:
+    starts = list(starts) if starts else ["0"]
+    ends = list(ends) if ends is not None else []
 
-    # 0. sanitize
-    input = Path(args.fn)
-    output = Path(args.output)
+    if len(starts) < len(ends):
+        raise ValueError(f"Too many --end/-to arguments ({len(ends)}) for --start/-ss arguments ({len(starts)}).")
+    if len(starts) > len(ends) + 1:
+        raise ValueError(f"Too many --start/-ss arguments ({len(starts)}) for --end/-to arguments ({len(ends)}).")
 
-    start = parse_time(args.start)
-    end = parse_time(args.end)
+    if len(starts) == len(ends) + 1:
+        ends.append("")
 
-    if start > end:
-        print(f"Skip, start time {start} s is later than end time {end} s.")
-        return
+    segments: list[tuple[float, float]] = []
+    for s_str, e_str in zip(starts, ends):
+        s = parse_time(s_str)
+        e = parse_time(e_str)
+        if e > 0 and s >= e:
+            raise ValueError(f"Start time {s} s ({s_str}) must be earlier than end time {e} s ({e_str}).")
+        segments.append((s, e))
 
-    if args.acopy:
+    return segments
+
+
+def resolve_output_path(input: Path, output_arg: str | None, video: bool, lossless: bool, acopy: bool) -> Path:
+    output = Path(output_arg) if output_arg else input.parent.joinpath(input.stem)
+    if acopy:
         if not output.suffix:
-            if args.video:
-                if args.lossless:
-                    output = output.parent.joinpath(f"{output.stem}.mkv")
-                else:
-                    output = output.parent.joinpath(f"{output.stem}.mp4")
+            if video:
+                ext = ".mkv" if lossless else ".mp4"
+                output = output.parent.joinpath(f"{output.stem}{ext}")
             else:
                 codec = get_audio_codec(input)
                 suffix_map = {
@@ -206,104 +217,235 @@ def encode_clip(args: argparse.Namespace):
                 }
                 ext = suffix_map.get(codec) if codec else None
                 if not ext:
-                    if input.suffix.lower() not in [".mp4", ".mkv", ".avi", ".mov", ".flv", ".webmts", ".ts", ".webm"]:
+                    if input.suffix.lower() not in [".mp4", ".mkv", ".avi", ".mov", ".flv", ".m2ts", ".ts", ".webm"]:
                         ext = input.suffix.lower()
                     else:
                         ext = ".m4a"
                 output = output.parent.joinpath(f"{output.stem}{ext}")
         else:
-            if args.video and output.suffix.lower() not in [".mp4", ".mkv"]:
-                if args.lossless:
-                    output = output.parent.joinpath(f"{output.stem}.mkv")
-                else:
-                    output = output.parent.joinpath(f"{output.stem}.mp4")
-
-        cmd = [
-            "ffmpeg", "-hide_banner",
-            "-ss", f"{start:.3f}",
-            *(["-to", f"{end:.3f}"] if end > 0 else []),
-            "-i", str(input.resolve()),
-            "-ss", "0",
-            "-map_metadata", "-1", # no metadata
-        ]
-
-        if args.video:
-            video_color = get_video_color(input)
-            cmd.extend([
-                "-c:v", "libx264", "-preset", "veryslow", "-crf", "23",
-                *video_color_args(video_color),
-                *x264_color_args(video_color),
-                "-c:a", "copy",
-            ])
-            print(f"{str(input)} -> {str(output)} (encode video, copy audio)")
-        else:
-            cmd.extend(["-vn", "-c:a", "copy"])
-            print(f"{str(input)} -> {str(output)} (copy audio)")
-
-        cmd.extend(["-y", str(output.resolve())])
-
-        subprocess.run(
-            cmd, check=True,
-            capture_output=True, text=True,
-            encoding="utf-8", errors="ignore"
-        )
-
-        final_loudness = get_loudness(output)
-        print("measure final output:", final_loudness)
-        print("FINISHED")
-        return
-
-    video_color = get_video_color(input) if args.video else VideoColor(None, None, None, None)
-
-    if args.video:
+            if video and output.suffix.lower() not in [".mp4", ".mkv"]:
+                ext = ".mkv" if lossless else ".mp4"
+                output = output.parent.joinpath(f"{output.stem}{ext}")
+    elif video:
         if output.suffix.lower() not in [".mp4", ".mkv"]:
-            if args.lossless:
-                output = output.parent.joinpath(f"{output.stem}.mkv")
-            else:
-                output = output.parent.joinpath(f"{output.stem}.mp4")
+            ext = ".mkv" if lossless else ".mp4"
+            output = output.parent.joinpath(f"{output.stem}{ext}")
     else:
-        if args.lossless:
+        if lossless:
             if output.suffix.lower() != ".flac":
                 output = output.parent.joinpath(f"{output.stem}.flac")
         else:
             if output.suffix.lower() != ".m4a":
                 output = output.parent.joinpath(f"{output.stem}.m4a")
 
+    if output.resolve() == input.resolve():
+        output = output.parent.joinpath(f"{output.stem}_clip{output.suffix}")
 
+    return output
+
+
+def run_ffmpeg(cmd: list[str]) -> bool:
+    try:
+        subprocess.run(
+            cmd, check=True,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="ignore"
+        )
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Error: FFmpeg exited with code {e.returncode}")
+        if e.stderr:
+            for line in e.stderr.strip().splitlines():
+                print(f" > {line}")
+        return False
+
+
+def build_clip_cmd(
+    input: Path,
+    output: Path,
+    segments: list[tuple[float, float]],
+    video: bool = False,
+    video_color: VideoColor | None = None,
+    lossless: bool = False,
+    acopy: bool = False,
+    audio_codec: str | None = None,
+    audio_bitrate: str = "",
+) -> list[str]:
+    cmd = ["ffmpeg", "-hide_banner"]
+
+    for s, e in segments:
+        cmd.extend(["-ss", f"{s:.3f}"])
+        if e > 0:
+            cmd.extend(["-to", f"{e:.3f}"])
+        cmd.extend(["-i", str(input.resolve()), "-ss", "0"])
+
+    if len(segments) > 1:
+        if acopy:
+            raise ValueError(
+                "Cannot use --acopy when concatenating multiple segments because FFmpeg concat filter requires decoding and re-encoding."
+            )
+        n = len(segments)
+        if video:
+            filter_inputs = "".join(f"[{i}:v][{i}:a]" for i in range(n))
+            filter_complex = f"{filter_inputs}concat=n={n}:v=1:a=1[outv][outa]"
+            cmd.extend(["-filter_complex", filter_complex, "-map", "[outv]", "-map", "[outa]"])
+        else:
+            filter_inputs = "".join(f"[{i}:a]" for i in range(n))
+            filter_complex = f"{filter_inputs}concat=n={n}:v=0:a=1[outa]"
+            cmd.extend(["-filter_complex", filter_complex, "-map", "[outa]"])
+
+    cmd.extend(["-map_metadata", "-1"])
+
+    if video:
+        cmd.extend(["-c:v", "libx264", "-preset", "veryslow", "-crf", "23"])
+        if video_color:
+            cmd.extend(video_color_args(video_color))
+            cmd.extend(x264_color_args(video_color))
+    else:
+        cmd.extend(["-vn"])
+
+    if acopy:
+        cmd.extend(["-c:a", "copy"])
+    elif audio_codec:
+        cmd.extend(["-c:a", audio_codec])
+        if audio_bitrate:
+            cmd.extend(["-ab", audio_bitrate])
+    elif lossless:
+        cmd.extend(["-c:a", "flac"])
+    else:
+        cmd.extend(["-c:a", "aac"])
+        if audio_bitrate:
+            cmd.extend(["-ab", audio_bitrate])
+
+    cmd.extend(["-y", str(output.resolve())])
+    return cmd
+
+
+def encode_clip(args: argparse.Namespace):
+
+    # 0. sanitize & parse
+    input = Path(args.fn)
+    if not input.exists():
+        print(f"Error: input file {input} does not exist.")
+        return
+
+    try:
+        segments = parse_segments(args.start, args.end)
+    except ValueError as e:
+        print(f"Error: {e}")
+        return
+
+    if args.acopy and len(segments) > 1:
+        print("Error: --acopy is not supported when concatenating multiple segments because FFmpeg concat filter requires decoding and re-encoding. Please omit --acopy (use --lossless if you want lossless audio).")
+        return
+
+    output = resolve_output_path(
+        input=input,
+        output_arg=args.output,
+        video=args.video,
+        lossless=args.lossless,
+        acopy=args.acopy,
+    )
+
+    video_color = get_video_color(input) if args.video else VideoColor(None, None, None, None)
+
+    # 1. acopy mode (only single segment)
+    if args.acopy:
+        cmd = build_clip_cmd(
+            input=input,
+            output=output,
+            segments=segments,
+            video=args.video,
+            video_color=video_color,
+            lossless=args.lossless,
+            acopy=True,
+        )
+        desc = "encode video, copy audio" if args.video else "copy audio"
+        print(f"{str(input)} -> {str(output)} ({desc})")
+        if args.print_cmd or args.dry_run:
+            print("[CMD]", shlex.join(cmd))
+        if args.dry_run:
+            print("FINISHED (dry run)")
+            return
+
+        if not run_ffmpeg(cmd):
+            return
+
+        final_loudness = get_loudness(output)
+        print("measure final output:", final_loudness)
+        print("FINISHED")
+        return
+
+    # 2. bypass gain adjust mode (single pass direct output)
+    if args.bypass_gain_adjust:
+        audio_codec = "flac" if args.lossless else "aac"
+        audio_bitrate = "" if args.lossless else (args.bitrate or ("320k" if args.video else "256k"))
+        cmd = build_clip_cmd(
+            input=input,
+            output=output,
+            segments=segments,
+            video=args.video,
+            video_color=video_color,
+            lossless=args.lossless,
+            acopy=False,
+            audio_codec=audio_codec,
+            audio_bitrate=audio_bitrate,
+        )
+        desc = f"bypass gain adjust, {'video + ' if args.video else ''}{audio_codec}"
+        print(f"{str(input)} -> {str(output)} ({desc})")
+        if args.print_cmd or args.dry_run:
+            print("[CMD]", shlex.join(cmd))
+        if args.dry_run:
+            print("FINISHED (dry run)")
+            return
+
+        if not run_ffmpeg(cmd):
+            return
+
+        final_loudness = get_loudness(output)
+        print("measure final output:", final_loudness)
+        print("FINISHED")
+        return
+
+    # 3. Two-pass loudness normalization mode
     with TemporaryDirectory(prefix="QuipClip_") as temp_dir:
-        # 1. clip -> flac
         temp_path = Path(temp_dir)
         temp_ext = ".mkv" if args.video else ".flac"
         temp_output = temp_path.joinpath(f"{output.stem}{temp_ext}")
 
         print(f"{str(input)} -> {str(temp_output)} (temporary)")
 
-        cmd = [
-            "ffmpeg", "-hide_banner",
-            "-ss", f"{start:.3f}",
-            *(["-to", f"{end:.3f}"] if end > 0 else []),
-            "-i", str(input.resolve()),
-            "-ss", "0", # avoid wrong duration
-            "-map_metadata", "-1", # no metadata
-        ]
-
-        if args.video:
-            cmd.extend([
-                "-c:v", "libx264", "-preset", "veryslow", "-crf", "23",
-                *video_color_args(video_color),
-                *x264_color_args(video_color),
-                "-c:a", "flac"
-            ])
-        else:
-            cmd.extend(["-vn"])
-
-        cmd.extend(["-y", str(temp_output.resolve())])
-
-        subprocess.run(
-            cmd, check=True,
-            capture_output=True, text=True,
-            encoding="utf-8", errors="ignore"
+        pass1_cmd = build_clip_cmd(
+            input=input,
+            output=temp_output,
+            segments=segments,
+            video=args.video,
+            video_color=video_color,
+            lossless=True,
+            acopy=False,
+            audio_codec="flac",
         )
+
+        if args.print_cmd or args.dry_run:
+            print("[CMD Pass 1 (Cut & Concat)]", shlex.join(pass1_cmd))
+
+        if args.dry_run:
+            audio_bitrate = args.bitrate or ("320k" if args.video else "256k")
+            pass2_preview = [
+                "ffmpeg", "-hide_banner",
+                "-i", str(temp_output.resolve()),
+                "-map_metadata", "-1",
+                *(["-c:v", "copy"] if args.video else ["-vn"]),
+                *(["-c:a", "flac"] if args.lossless else ["-c:a", "aac", "-ab", audio_bitrate]),
+                "-af", "<loudnorm/volume filter evaluated from Pass 1 output>,aresample=resampler=soxr:osr=48000:precision=33:dither_method=triangular",
+                "-y", str(output.resolve()),
+            ]
+            print("[CMD Pass 2 (Loudness Adjustment Preview)]", shlex.join(pass2_preview))
+            print("FINISHED (dry run)")
+            return
+
+        if not run_ffmpeg(pass1_cmd):
+            return
 
         loudness = get_loudness(temp_output)
         measured = f"measured_I={loudness.I}:measured_LRA={loudness.LRA}:measured_TP={loudness.TP}:measured_thresh={loudness.Thresh}"
@@ -347,7 +489,7 @@ def encode_clip(args: argparse.Namespace):
                 "-y", str(output.resolve()),
             ])
         else:
-            audio_bitrate = args.bitrate or ("320k" if args.video else "192k")
+            audio_bitrate = args.bitrate or ("320k" if args.video else "256k")
             cmd.extend([
                 "-c:a", "aac", "-ab", audio_bitrate,
                 "-af", f"{audio_filter},aresample=resampler=soxr:osr=48000:precision=33:dither_method=triangular",
@@ -355,12 +497,11 @@ def encode_clip(args: argparse.Namespace):
             ])
 
         print(f"{str(temp_output)} -> {str(output)} ({'loudnorm' if args.loudnorm else 'volume'})")
+        if args.print_cmd:
+            print("[CMD Pass 2 (Loudness Adjustment)]", shlex.join(cmd))
 
-        subprocess.run(
-            cmd, check=True,
-            capture_output=True, text=True,
-            encoding="utf-8", errors="ignore"
-        )
+        if not run_ffmpeg(cmd):
+            return
 
         final_loudness = get_loudness(output)
         print("measure final output:", final_loudness)
@@ -372,11 +513,11 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Clip audio from input video and loudnorm it!")
 
-    parser.add_argument("fn", type=str)
-    parser.add_argument("output_fn", type=str, nargs="?")
-    parser.add_argument("--start", "-ss", type=str, default="0")
-    parser.add_argument("--end", "-to", type=str, default="")
-    parser.add_argument("--output", "-o", type=str, required=False)
+    parser.add_argument("fn", type=str, help="input video or audio file")
+    parser.add_argument("output_fn", type=str, nargs="?", help="output file path (optional)")
+    parser.add_argument("--start", "-ss", action="extend", nargs="+", help="start time(s), e.g. 00:01:00 or 10.5 (can be repeated)")
+    parser.add_argument("--end", "-to", action="extend", nargs="+", help="end time(s), e.g. 00:02:00 or 25.0 (can be repeated)")
+    parser.add_argument("--output", "-o", type=str, required=False, help="output file path")
     parser.add_argument("-I", "--LUFS", type=float, help="loudness target", default=-18.0)
     parser.add_argument("-l", "--LRA", type=float, help="loudness range", default=7.0)
     parser.add_argument("-t", "--TP", type=float, help="true peak loudness", default=-1.0)
@@ -384,8 +525,11 @@ if __name__ == "__main__":
     parser.add_argument("--lossless", action="store_true", help="encode audio as flac")
     parser.add_argument("--loudnorm", action="store_true", help="use loudnorm filter instead of simple volume gain")
     parser.add_argument("--linear", action="store_true", help="use linear loudnorm")
-    parser.add_argument("--acopy", action="store_true", help="only copy audio stream without re-encoding")
+    parser.add_argument("--acopy", action="store_true", help="only copy audio stream without re-encoding (single segment only)")
     parser.add_argument("--bitrate", type=str, default="", help="use audio bitrate if specified")
+    parser.add_argument("--bypass-gain-adjust", action="store_true", help="bypass audio loudness/gain adjustment")
+    parser.add_argument("--print-cmd", action="store_true", help="print generated ffmpeg command before execution")
+    parser.add_argument("--dry-run", action="store_true", help="print generated ffmpeg command and exit without running")
 
     args = parser.parse_args()
     args.output = args.output if args.output else args.output_fn
