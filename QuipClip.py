@@ -176,8 +176,18 @@ def parse_time(t: str) -> float:
 
 
 def parse_segments(starts: list[str] | None, ends: list[str] | None) -> list[tuple[float, float]]:
-    starts = list(starts) if starts else ["0"]
-    ends = list(ends) if ends is not None else []
+    raw_starts = list(starts) if starts else ["0"]
+    raw_ends = list(ends) if ends is not None else []
+
+    starts: list[str] = []
+    for s in raw_starts:
+        starts.extend(s.replace(",", " ").split())
+    if not starts:
+        starts = ["0"]
+
+    ends: list[str] = []
+    for e in raw_ends:
+        ends.extend(e.replace(",", " ").split())
 
     if len(starts) < len(ends):
         raise ValueError(f"Too many --end/-to arguments ({len(ends)}) for --start/-ss arguments ({len(starts)}).")
@@ -515,8 +525,8 @@ if __name__ == "__main__":
 
     parser.add_argument("fn", type=str, help="input video or audio file")
     parser.add_argument("output_fn", type=str, nargs="?", help="output file path (optional)")
-    parser.add_argument("--start", "-ss", action="extend", nargs="+", help="start time(s), e.g. 00:01:00 or 10.5 (can be repeated)")
-    parser.add_argument("--end", "-to", action="extend", nargs="+", help="end time(s), e.g. 00:02:00 or 25.0 (can be repeated)")
+    parser.add_argument("--start", "-ss", action="append", help="start time, e.g. 00:01:00 or 10.5 (can be repeated)")
+    parser.add_argument("--end", "-to", action="append", help="end time, e.g. 00:02:00 or 25.0 (can be repeated)")
     parser.add_argument("--output", "-o", type=str, required=False, help="output file path")
     parser.add_argument("-I", "--LUFS", type=float, help="loudness target", default=-18.0)
     parser.add_argument("-l", "--LRA", type=float, help="loudness range", default=7.0)
